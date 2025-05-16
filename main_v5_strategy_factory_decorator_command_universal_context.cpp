@@ -13,7 +13,6 @@
 #include <QDebug>
 #include <QList>
 #include <QMessageBox>
-#include <QClipboard>
 
 //*******************************************************************************************/
 //万能类型上下文
@@ -24,10 +23,8 @@ public:
     QVariantMap extras;                             // 存储任意键值扩展
     QGraphicsScene* scene = nullptr;                // 可选：传场景
     QWidget* view = nullptr;                        // 可选：传视图
-    QGraphicsItem* item = nullptr;                  // 可选：传图元
+    QGraphicsItem* item = nullptr;                   // 可选：传图元
 };
-
-using CmdCtxPtr = std::shared_ptr<CommandContext>;
 
 //*******************************************************************************************/
 //图元
@@ -108,95 +105,24 @@ public:
 class ICommand {
 public:
     virtual ~ICommand() = default;
-    virtual void execute(CmdCtxPtr ctx) = 0;
-
-    // 控制对应的Action是否启用
-    virtual bool isEnable(CmdCtxPtr ctx) const {
-        return true;
-    }
-
-    // 控制对应的Action是否显示
-    virtual bool isVisible(CmdCtxPtr ctx) const {
-        return true;
-    }
+    virtual void execute(const CommandContext& ctx) = 0;
 };
 
-// 组合命令(为了以后扩展)
-class CompositeCommand : public ICommand {
-public:
-    void addCommand(std::shared_ptr<ICommand> cmd) {
-        if(cmd) commands.push_back(std::move(cmd));
-    }
-
-    void execute(CmdCtxPtr ctx) override {
-        for (auto& cmd : commands) {
-            if(cmd) cmd->execute(ctx);
-        }
-    }
-
-private:
-    std::vector<std::shared_ptr<ICommand>> commands;
-};
-
-// 命令组合器，用于生成组合命令
-namespace CommandUtils {
-std::shared_ptr<ICommand> combineCommands(std::initializer_list<std::shared_ptr<ICommand>> list) {
-    auto combo = std::make_shared<CompositeCommand>();
-    for (const auto& cmd : list) {
-        combo->addCommand(cmd);
-    }
-    return combo;
-}
-}
-
-// 复制命令
 class CopyCommand : public ICommand {
 public:
-    void execute(CmdCtxPtr ctx) override {
+    void execute(const CommandContext& ctx) override {
         // 选中的对象可能是多个
-        auto list = ctx->extras.value("selection").value<QList<BaseCustomItem*>>();
+        auto list = ctx.extras.value("selection").value<QList<BaseCustomItem*>>();
         for (BaseCustomItem* item : list) {
             if (item) item->copy();
         }
     }
 };
 
-// 粘贴命令
-class PasteCommand : public ICommand {
-public:
-    void execute(CmdCtxPtr ctx) override {
-        QClipboard* clipboard = QApplication::clipboard();
-        QMessageBox::information(nullptr, "paste", clipboard->text());
-    }
-
-    virtual bool isEnable(CmdCtxPtr ctx) const override {
-        QClipboard* clipboard = QApplication::clipboard();
-        return !clipboard->text().isEmpty();
-        // return false;
-    }
-};
-
-// 空命令，什么也不做
 class NullCommand : public ICommand {
 public:
-    void execute(CmdCtxPtr ctx) override {
+    void execute(const CommandContext& ctx) override {
         // do nothing
-    }
-};
-
-// 自定义命令1
-class CustomCommand1 : public ICommand {
-public:
-    void execute(CmdCtxPtr ctx) override {
-        qDebug() << "CustomCommand1 executed";
-    }
-};
-
-// 自定义命令2
-class CustomCommand2 : public ICommand {
-public:
-    void execute(CmdCtxPtr ctx) override {
-        qDebug() << "CustomCommand2 executed";
     }
 };
 
@@ -208,22 +134,19 @@ public:
 class MenuStrategy {
 public:
     virtual ~MenuStrategy() = default;
-    virtual QMenu* createMenu(QWidget* parent, CmdCtxPtr ctx) = 0;
+    virtual QMenu* createMenu(QWidget* parent, const CommandContext& ctx) = 0;
 
 protected:
     void addCommandAction(QMenu* menu, const QString& text,
                           std::shared_ptr<ICommand> cmd,
-                          CmdCtxPtr ctx) {
-        if (!cmd || !cmd->isVisible(ctx)) return;
-
+                          const CommandContext& ctx) {
         auto* action = menu->addAction(text);
-        action->setEnabled(cmd->isEnable(ctx));
         QObject::connect(action, &QAction::triggered, [cmd, ctx]() {
             cmd->execute(ctx);
         });
     }
 
-    void addCommandAction(QMenu* menu, const QString& text, CmdCtxPtr ctx) {
+    void addCommandAction(QMenu* menu, const QString& text, const CommandContext& ctx) {
         addCommandAction(menu, text, std::make_shared<NullCommand>(), ctx);
     }
 };
@@ -234,7 +157,7 @@ public:
     BaseMenuDecorator(std::shared_ptr<MenuStrategy> wrapped)
         : wrappedStrategy(std::move(wrapped)) {}
 
-    QMenu* createMenu(QWidget* parent, CmdCtxPtr ctx) override {
+    QMenu* createMenu(QWidget* parent, const CommandContext& ctx) override {
         QMenu* menu = nullptr;
         if (wrappedStrategy) {
             menu = wrappedStrategy->createMenu(parent, ctx);
@@ -245,7 +168,6 @@ public:
         menu->addSeparator();
         addCommandAction(menu, "复制", std::make_shared<CopyCommand>(), ctx);
         addCommandAction(menu, "剪切", ctx);
-        addCommandAction(menu, "粘贴", std::make_shared<PasteCommand>(), ctx);
         return menu;
     }
 
@@ -258,7 +180,7 @@ public:
     PasteOnlyMenuDecorator(std::shared_ptr<MenuStrategy> wrapped)
         : wrappedStrategy(std::move(wrapped)) {}
 
-    QMenu* createMenu(QWidget* parent, CmdCtxPtr ctx) override {
+    QMenu* createMenu(QWidget* parent, const CommandContext& ctx) override {
         QMenu* menu = nullptr;
         if (wrappedStrategy) {
             menu = wrappedStrategy->createMenu(parent, ctx);
@@ -278,7 +200,7 @@ private:
 // 文本菜单策略 (基础菜单 + 特殊菜单)
 class TextItemMenuStrategy : public MenuStrategy {
 public:
-    QMenu* createMenu(QWidget* parent, CmdCtxPtr ctx) override {
+    QMenu* createMenu(QWidget* parent, const CommandContext& ctx) override {
         QMenu* menu = new QMenu(parent);
         addCommandAction(menu, "编辑文本", ctx);
         addCommandAction(menu, "改变字体", ctx);
@@ -289,7 +211,7 @@ public:
 // 背景菜单策略 (基础菜单 + 特殊菜单)
 class BackgroundMenuStrategy : public MenuStrategy {
 public:
-    QMenu* createMenu(QWidget* parent, CmdCtxPtr ctx) override {
+    QMenu* createMenu(QWidget* parent, const CommandContext& ctx) override {
         QMenu* menu = new QMenu(parent);
         addCommandAction(menu, "添加幻灯片", ctx);
         addCommandAction(menu, "版式布局", ctx);
@@ -300,14 +222,9 @@ public:
 // 不支持基础菜单，只显示自己的菜单
 class NoBaseMenuStrategy : public MenuStrategy {
 public:
-    QMenu* createMenu(QWidget* parent, CmdCtxPtr ctx) override {
+    QMenu* createMenu(QWidget* parent, const CommandContext& ctx) override {
         QMenu* menu = new QMenu(parent);
-
-        auto combo = std::make_shared<CompositeCommand>();
-        combo->addCommand(std::make_shared<CustomCommand1>());
-        combo->addCommand(std::make_shared<CustomCommand2>());
-
-        addCommandAction(menu, "无公共操作，仅特殊操作", combo, ctx);
+        addCommandAction(menu, "无公共操作，仅特殊操作", ctx);
         return menu;
     }
 };
@@ -315,20 +232,14 @@ public:
 // 椭圆菜单策略 (基础菜单 + 特殊菜单)
 class CircleMenuStrategy : public MenuStrategy {
 public:
-    QMenu* createMenu(QWidget* parent, CmdCtxPtr ctx) override {
+    QMenu* createMenu(QWidget* parent, const CommandContext& ctx) override {
         QMenu* menu = new QMenu(parent);
         addCommandAction(menu, "改变颜色", ctx);
         addCommandAction(menu, "改变大小", ctx);
 
-        // 命令组合器使用
-        auto combo = CommandUtils::combineCommands({
-            std::make_shared<CustomCommand1>(),
-            std::make_shared<CustomCommand2>()
-        });
-
         // 二级菜单
         QMenu* subMenu = new QMenu("图形属性", menu);
-        addCommandAction(subMenu, "旋转", combo, ctx);
+        addCommandAction(subMenu, "旋转", ctx);
         addCommandAction(subMenu, "缩放", ctx);
 
         menu->addMenu(subMenu);
@@ -392,9 +303,9 @@ protected:
             if (baseItem) {
                 auto strategy = MenuStrategyFactory::GetInstance().create(baseItem->objectType());
                 if (strategy) {
-                    CmdCtxPtr ctx = std::make_shared<CommandContext>();
-                    ctx->scene = this;
-                    ctx->extras["selection"] = QVariant::fromValue(QList<BaseCustomItem*>() << baseItem);
+                    CommandContext ctx;
+                    ctx.scene = this;
+                    ctx.extras["selection"] = QVariant::fromValue(QList<BaseCustomItem*>() << baseItem);
                     QMenu* menu = strategy->createMenu(nullptr, ctx);
                     menu->exec(event->screenPos());
                     delete menu;
@@ -405,7 +316,7 @@ protected:
 
         auto defaultStrategy = MenuStrategyFactory::GetInstance().create("Background");
         if (defaultStrategy) {
-            CmdCtxPtr ctx = std::make_shared<CommandContext>();
+            CommandContext ctx;
             QMenu* menu = defaultStrategy->createMenu(nullptr, ctx);
             menu->exec(event->screenPos());
             delete menu;
@@ -418,6 +329,7 @@ protected:
 private:
     std::shared_ptr<MenuStrategy> menuStrategy;
 };
+
 
 //*******************************************************************************************/
 //注册
