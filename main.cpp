@@ -15,6 +15,18 @@
 #include <QMessageBox>
 
 //*******************************************************************************************/
+//万能类型上下文
+//*******************************************************************************************/
+class CommandContext {
+public:
+    void* target = nullptr;                         // 可是任何图元、界面对象
+    QVariantMap extras;                             // 存储任意键值扩展
+    QGraphicsScene* scene = nullptr;                // 可选：传场景
+    QWidget* view = nullptr;                        // 可选：传视图
+    QGraphicsItem* item = nullptr;                   // 可选：传图元
+};
+
+//*******************************************************************************************/
 //图元
 //*******************************************************************************************/
 class BaseCustomItem : public QGraphicsItem {
@@ -76,7 +88,7 @@ public:
         painter->setPen(QColor(211, 37, 167));
         painter->setBrush(QColor(211, 37, 167));
         // smooth
-        painter->setRenderHint(QPainter::Antialiasing, true);        
+        painter->setRenderHint(QPainter::Antialiasing, true);
         painter->drawEllipse(boundingRect());
     }
 
@@ -87,53 +99,21 @@ public:
 
 
 //*******************************************************************************************/
-// 选中上下文    (全局单例)
-//*******************************************************************************************/
-class SelectionContext {
-public:
-    static SelectionContext& GetInstance() {
-        static SelectionContext ctx;
-        return ctx;
-    }
-
-    void setSelectedItem(BaseCustomItem* item) {
-        // 单选
-        selectedItems.clear();
-        if (item) selectedItems.append(item);
-    }
-
-    void setSelectedItems(const QList<BaseCustomItem*>& items) {
-        // 拖动框选多个
-        selectedItems.clear();
-        selectedItems = items;
-    }
-
-    const QList<BaseCustomItem*>& getSelectedItems() const {
-        return selectedItems;
-    }
-
-    void clear() { selectedItems.clear(); }
-
-private:
-    QList<BaseCustomItem*> selectedItems;    
-};
-
-
-//*******************************************************************************************/
 // 右键命令
 //*******************************************************************************************/
 // 命令接口
 class ICommand {
 public:
     virtual ~ICommand() = default;
-    virtual void execute() = 0;
+    virtual void execute(const CommandContext& ctx) = 0;
 };
 
 class CopyCommand : public ICommand {
 public:
-    void execute() override {
-        const auto& items = SelectionContext::GetInstance().getSelectedItems();
-        for (auto* item : items) {
+    void execute(const CommandContext& ctx) override {
+        // 选中的对象可能是多个
+        auto list = ctx.extras.value("selection").value<QList<BaseCustomItem*>>();
+        for (BaseCustomItem* item : list) {
             if (item) item->copy();
         }
     }
@@ -141,7 +121,7 @@ public:
 
 class NullCommand : public ICommand {
 public:
-    void execute() override {
+    void execute(const CommandContext& ctx) override {
         // do nothing
     }
 };
@@ -154,18 +134,20 @@ public:
 class MenuStrategy {
 public:
     virtual ~MenuStrategy() = default;
-    virtual QMenu* createMenu(QWidget* parent) = 0;
+    virtual QMenu* createMenu(QWidget* parent, const CommandContext& ctx) = 0;
 
 protected:
-    void addCommandAction(QMenu* menu, const QString& text, std::shared_ptr<ICommand> cmd) {
+    void addCommandAction(QMenu* menu, const QString& text,
+                          std::shared_ptr<ICommand> cmd,
+                          const CommandContext& ctx) {
         auto* action = menu->addAction(text);
-        QObject::connect(action, &QAction::triggered, [cmd]() { 
-            cmd->execute();
+        QObject::connect(action, &QAction::triggered, [cmd, ctx]() {
+            cmd->execute(ctx);
         });
     }
 
-    void addCommandAction(QMenu* menu, const QString& text) {
-        addCommandAction(menu, text, std::make_shared<NullCommand>());
+    void addCommandAction(QMenu* menu, const QString& text, const CommandContext& ctx) {
+        addCommandAction(menu, text, std::make_shared<NullCommand>(), ctx);
     }
 };
 
@@ -175,18 +157,17 @@ public:
     BaseMenuDecorator(std::shared_ptr<MenuStrategy> wrapped)
         : wrappedStrategy(std::move(wrapped)) {}
 
-    QMenu* createMenu(QWidget* parent) override {
+    QMenu* createMenu(QWidget* parent, const CommandContext& ctx) override {
         QMenu* menu = nullptr;
         if (wrappedStrategy) {
-            menu = wrappedStrategy->createMenu(parent);
+            menu = wrappedStrategy->createMenu(parent, ctx);
         } else {
             menu = new QMenu(parent);
         }
         // 添加基础菜单项
         menu->addSeparator();
-        addCommandAction(menu, QString::fromLocal8Bit("复制"), std::make_shared<CopyCommand>());
-        addCommandAction(menu, QString::fromLocal8Bit("剪切"));
-        addCommandAction(menu, QString::fromLocal8Bit("粘贴"));
+        addCommandAction(menu, "复制", std::make_shared<CopyCommand>(), ctx);
+        addCommandAction(menu, "剪切", ctx);
         return menu;
     }
 
@@ -199,16 +180,16 @@ public:
     PasteOnlyMenuDecorator(std::shared_ptr<MenuStrategy> wrapped)
         : wrappedStrategy(std::move(wrapped)) {}
 
-    QMenu* createMenu(QWidget* parent) override {
+    QMenu* createMenu(QWidget* parent, const CommandContext& ctx) override {
         QMenu* menu = nullptr;
         if (wrappedStrategy) {
-            menu = wrappedStrategy->createMenu(parent);
+            menu = wrappedStrategy->createMenu(parent, ctx);
         } else {
             menu = new QMenu(parent);
         }
 
         menu->addSeparator();
-        addCommandAction(menu, QString::fromLocal8Bit("粘贴"));
+        addCommandAction(menu, "粘贴", ctx);
         return menu;
     }
 
@@ -219,10 +200,10 @@ private:
 // 文本菜单策略 (基础菜单 + 特殊菜单)
 class TextItemMenuStrategy : public MenuStrategy {
 public:
-    QMenu* createMenu(QWidget* parent) override {
+    QMenu* createMenu(QWidget* parent, const CommandContext& ctx) override {
         QMenu* menu = new QMenu(parent);
-        addCommandAction(menu, QString::fromLocal8Bit("编辑文本"));
-        addCommandAction(menu, QString::fromLocal8Bit("改变字体"));
+        addCommandAction(menu, "编辑文本", ctx);
+        addCommandAction(menu, "改变字体", ctx);
         return menu;
     }
 };
@@ -230,10 +211,10 @@ public:
 // 背景菜单策略 (基础菜单 + 特殊菜单)
 class BackgroundMenuStrategy : public MenuStrategy {
 public:
-    QMenu* createMenu(QWidget* parent) override {
+    QMenu* createMenu(QWidget* parent, const CommandContext& ctx) override {
         QMenu* menu = new QMenu(parent);
-        addCommandAction(menu, QString::fromLocal8Bit("添加幻灯片"));
-        addCommandAction(menu, QString::fromLocal8Bit("版式布局"));
+        addCommandAction(menu, "添加幻灯片", ctx);
+        addCommandAction(menu, "版式布局", ctx);
         return menu;
     }
 };
@@ -241,9 +222,9 @@ public:
 // 不支持基础菜单，只显示自己的菜单
 class NoBaseMenuStrategy : public MenuStrategy {
 public:
-    QMenu* createMenu(QWidget* parent) override {
+    QMenu* createMenu(QWidget* parent, const CommandContext& ctx) override {
         QMenu* menu = new QMenu(parent);
-        addCommandAction(menu, QString::fromLocal8Bit("无公共操作，仅特殊操作"));
+        addCommandAction(menu, "无公共操作，仅特殊操作", ctx);
         return menu;
     }
 };
@@ -251,20 +232,21 @@ public:
 // 椭圆菜单策略 (基础菜单 + 特殊菜单)
 class CircleMenuStrategy : public MenuStrategy {
 public:
-    QMenu* createMenu(QWidget* parent) override {
+    QMenu* createMenu(QWidget* parent, const CommandContext& ctx) override {
         QMenu* menu = new QMenu(parent);
-        addCommandAction(menu, QString::fromLocal8Bit("改变颜色"));
-        addCommandAction(menu, QString::fromLocal8Bit("改变大小"));
-        
+        addCommandAction(menu, "改变颜色", ctx);
+        addCommandAction(menu, "改变大小", ctx);
+
         // 二级菜单
-        QMenu* subMenu = new QMenu(QString::fromLocal8Bit("图形属性"), menu);
-        addCommandAction(subMenu, QString::fromLocal8Bit("旋转"));
-        addCommandAction(subMenu, QString::fromLocal8Bit("缩放"));
-        
+        QMenu* subMenu = new QMenu("图形属性", menu);
+        addCommandAction(subMenu, "旋转", ctx);
+        addCommandAction(subMenu, "缩放", ctx);
+
         menu->addMenu(subMenu);
         return menu;
     }
 };
+
 
 //*******************************************************************************************/
 // 工厂
@@ -308,15 +290,23 @@ protected:
     void contextMenuEvent(QGraphicsSceneContextMenuEvent* event) override {
         QGraphicsItem* item = itemAt(event->scenePos(), QTransform());
 
+
+        // auto list = ctx.extras.value("selection").value<QList<BaseCustomItem*>>();
+        // for (BaseCustomItem* item : list) {
+        //     if (item) item->copy();
+        // }
+
         if(item) {
             BaseCustomItem* baseItem = dynamic_cast<BaseCustomItem*>(item);
-            
+
             // 转换成功
             if (baseItem) {
-                SelectionContext::GetInstance().setSelectedItem(baseItem);
                 auto strategy = MenuStrategyFactory::GetInstance().create(baseItem->objectType());
                 if (strategy) {
-                    QMenu* menu = strategy->createMenu(nullptr);
+                    CommandContext ctx;
+                    ctx.scene = this;
+                    ctx.extras["selection"] = QVariant::fromValue(QList<BaseCustomItem*>() << baseItem);
+                    QMenu* menu = strategy->createMenu(nullptr, ctx);
                     menu->exec(event->screenPos());
                     delete menu;
                     return;  // 菜单弹出后返回，防止继续冒泡
@@ -326,7 +316,8 @@ protected:
 
         auto defaultStrategy = MenuStrategyFactory::GetInstance().create("Background");
         if (defaultStrategy) {
-            QMenu* menu = defaultStrategy->createMenu(nullptr);
+            CommandContext ctx;
+            QMenu* menu = defaultStrategy->createMenu(nullptr, ctx);
             menu->exec(event->screenPos());
             delete menu;
             return;
@@ -338,6 +329,7 @@ protected:
 private:
     std::shared_ptr<MenuStrategy> menuStrategy;
 };
+
 
 //*******************************************************************************************/
 //注册
@@ -361,8 +353,10 @@ void registerMenuStrategies() {
 }
 
 
-
+Q_DECLARE_METATYPE(QList<BaseCustomItem*>)
 int main(int argc, char *argv[]) {
+    qRegisterMetaType<QList<BaseCustomItem*>>("QList<BaseCustomItem*>");
+
     QApplication app(argc, argv);
 
     registerMenuStrategies();

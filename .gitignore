@@ -46,3 +46,4 @@ Makefile
 *.stash
 debug/
 release/
+.qtc_clangd/
